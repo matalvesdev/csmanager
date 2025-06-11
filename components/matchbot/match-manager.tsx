@@ -34,6 +34,8 @@ import {
   Download,
   Eye,
 } from "lucide-react"
+import { useMatchBotWebSocket } from "@/hooks/use-matchbot-websocket"
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert"
 
 interface MatchStatus {
   id: string
@@ -120,42 +122,53 @@ export function MatchManager({ matchId, serverId }: MatchManagerProps) {
   const [matchEvents, setMatchEvents] = useState<MatchEvent[]>([])
   const [matchPlayers, setMatchPlayers] = useState<MatchPlayer[]>([])
   const [availableCommands, setAvailableCommands] = useState<MatchCommand[]>([])
+  const [criticalError, setCriticalError] = useState<string | null>(null)
 
-  // Carregamento real dos dados do MatchBot
+  // Carregamento real dos dados do MatchBot com polling
   useEffect(() => {
+    let interval: NodeJS.Timeout | undefined
     const loadMatchData = async () => {
       setIsLoading(true)
       try {
         // Buscar status da partida do MatchBot (exemplo de endpoint)
         const statusRes = await fetch(`/api/matchbot/status?matchId=${matchId || ""}&serverId=${serverId || ""}`)
         const statusData = await statusRes.json()
+        if (statusData.error) throw new Error(statusData.error)
         setMatchStatus(statusData)
+        setCriticalError(null)
 
         // Buscar eventos da partida
         const eventsRes = await fetch(`/api/matchbot/events?matchId=${matchId || ""}`)
         const eventsData = await eventsRes.json()
+        if (eventsData.error) throw new Error(eventsData.error)
         setMatchEvents(eventsData)
 
         // Buscar jogadores da partida
         const playersRes = await fetch(`/api/matchbot/players?matchId=${matchId || ""}`)
         const playersData = await playersRes.json()
+        if (playersData.error) throw new Error(playersData.error)
         setMatchPlayers(playersData)
 
         // Buscar comandos disponíveis
         const commandsRes = await fetch(`/api/matchbot/commands?matchId=${matchId || ""}`)
         const commandsData = await commandsRes.json()
+        if (commandsData.error) throw new Error(commandsData.error)
         setAvailableCommands(commandsData)
-      } catch (error) {
+      } catch (error: any) {
+        setCriticalError(error.message)
         toast({
-          title: "Erro ao carregar dados",
-          description: "Não foi possível carregar os dados da partida.",
+          title: "Erro ao carregar dados do MatchBot",
+          description: error.message || "Não foi possível carregar os dados da partida.",
           variant: "destructive",
+          duration: 10000,
         })
       } finally {
         setIsLoading(false)
       }
     }
     loadMatchData()
+    interval = setInterval(loadMatchData, 5000)
+    return () => interval && clearInterval(interval)
   }, [matchId, serverId, toast])
 
   // Envio real de comandos para o MatchBot
@@ -168,23 +181,34 @@ export function MatchManager({ matchId, serverId }: MatchManagerProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ matchId, serverId, command: commandInput })
       })
-      if (!res.ok) throw new Error()
+      const data = await res.json()
+      if (!res.ok || data.error) throw new Error(data.error || "Erro desconhecido")
       setCommandInput("")
       setShowCommandDialog(false)
       toast({
         title: "Comando enviado",
         description: `O comando "${commandInput}" foi enviado com sucesso.`,
       })
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Erro ao enviar comando",
-        description: "Não foi possível enviar o comando para o servidor.",
+        description: error.message || "Não foi possível enviar o comando para o servidor.",
         variant: "destructive",
+        duration: 10000,
       })
     } finally {
       setIsLoading(false)
     }
   }
+
+  // WebSocket MatchBot: atualização instantânea
+  useMatchBotWebSocket({
+    matchId,
+    serverId,
+    onStatus: (status) => setMatchStatus(status),
+    onEvents: (events) => setMatchEvents(events),
+    onPlayers: (players) => setMatchPlayers(players),
+  })
 
   const getStatusBadge = (status: MatchStatus["status"]) => {
     const variants = {
@@ -299,6 +323,15 @@ export function MatchManager({ matchId, serverId }: MatchManagerProps) {
     )
   }
 
+  if (criticalError) {
+    return (
+      <Alert variant="destructive" className="mb-4">
+        <AlertTitle>Erro crítico na comunicação com o MatchBot</AlertTitle>
+        <AlertDescription>{criticalError}</AlertDescription>
+      </Alert>
+    )
+  }
+
   return (
     <>
       <Card className="w-full">
@@ -321,10 +354,11 @@ export function MatchManager({ matchId, serverId }: MatchManagerProps) {
         </CardHeader>
         <CardContent>
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="grid grid-cols-3 mb-4">
+            <TabsList className="grid grid-cols-4 mb-4">
               <TabsTrigger value="status">Status</TabsTrigger>
               <TabsTrigger value="players">Jogadores</TabsTrigger>
               <TabsTrigger value="events">Eventos</TabsTrigger>
+              <TabsTrigger value="logs">Logs</TabsTrigger>
             </TabsList>
 
             <TabsContent value="status" className="space-y-4">
@@ -422,30 +456,15 @@ export function MatchManager({ matchId, serverId }: MatchManagerProps) {
               <div className="p-4 border rounded-md">
                 <h3 className="font-medium mb-2">Comandos Rápidos</h3>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm">
-                    <Play className="h-4 w-4 mr-2" />
-                    Iniciar Partida
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <Pause className="h-4 w-4 mr-2" />
-                    Pausar
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    Reiniciar
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <CheckCircle className="h-4 w-4 mr-2" />
-                    Forçar Ready
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <Swords className="h-4 w-4 mr-2" />
-                    Round de Faca
-                  </Button>
-                  <Button variant="outline" size="sm">
-                    <Eye className="h-4 w-4 mr-2" />
-                    Conectar HLTV
-                  </Button>
+                  {availableCommands.length > 0 ? (
+                    availableCommands.map((cmd) => (
+                      <Button key={cmd.command} variant="outline" size="sm" onClick={() => setCommandInput(cmd.command)}>
+                        {cmd.command.replace("!", "").toUpperCase()}
+                      </Button>
+                    ))
+                  ) : (
+                    <span className="text-muted-foreground text-sm">Nenhum comando disponível no momento.</span>
+                  )}
                 </div>
               </div>
             </TabsContent>
@@ -537,6 +556,24 @@ export function MatchManager({ matchId, serverId }: MatchManagerProps) {
                         </div>
                       </div>
                     ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="logs">
+              <div className="border rounded-md">
+                <ScrollArea className="h-[400px]">
+                  <div className="p-4 space-y-2 font-mono text-xs bg-black text-green-400">
+                    {matchEvents.length > 0 ? (
+                      matchEvents.map((event) => (
+                        <div key={event.id}>
+                          [{formatTimestamp(event.timestamp)}] {event.type.toUpperCase()} {event.player ? `(${event.player})` : ""} {event.message}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-muted-foreground">Nenhum log disponível.</div>
+                    )}
                   </div>
                 </ScrollArea>
               </div>
